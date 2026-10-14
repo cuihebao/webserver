@@ -80,7 +80,7 @@ std::string makeResponse(int status, const std::string &body)
 std::string alarmReset(const std::string &body)
 {
     // TODO: 解析 body，执行复位
-    return "{\"result\":\"ALARMRESET ok\"}";
+    return "{\"result\":\"hahaha ok\"}";
 }
 
 std::string sensorAlarm(const std::string &body)
