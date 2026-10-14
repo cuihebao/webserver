@@ -10,6 +10,7 @@
 #include <thread>
 #include <map>
 #include <functional>
+#include <cctype>
 
 using Handler = std::function<std::string(const std::string &body, int &status)>;
 
@@ -53,6 +54,9 @@ std::string makeResponse(int status, const std::string &body)
     case 200:
         statusText = "OK";
         break;
+    case 204:
+        statusText = "No Content";
+        break; // 预检用
     case 400:
         statusText = "Bad Request";
         break;
@@ -70,6 +74,12 @@ std::string makeResponse(int status, const std::string &body)
     oss << "HTTP/1.1 " << status << " " << statusText << "\r\n"
         << "Content-Type: application/json; charset=utf-8\r\n"
         << "Content-Length: " << body.size() << "\r\n"
+        // ↓↓↓ CORS 三件套 ↓↓↓
+        << "Access-Control-Allow-Origin: *\r\n"
+        << "Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS\r\n"
+        << "Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With\r\n"
+        << "Access-Control-Max-Age: 86400\r\n"
+        // ↑↑↑ CORS 三件套 ↑↑↑
         << "Connection: close\r\n"
         << "\r\n"
         << body;
@@ -101,21 +111,63 @@ std::string getAlarmType(const std::string &body)
 // ============ 连接处理（对应 onHttpAccepted） ============
 void handleClient(int clientFd)
 {
+    std::string buffer;
     char buf[8192];
-    ssize_t n = recv(clientFd, buf, sizeof(buf) - 1, 0);
-    if (n <= 0)
+
+    // 循环读，直到 header 完整 + body 读满 Content-Length
+    while (true)
+    {
+        ssize_t n = recv(clientFd, buf, sizeof(buf), 0);
+        if (n <= 0)
+            break;
+        buffer.append(buf, n);
+
+        size_t headerEnd = buffer.find("\r\n\r\n");
+        if (headerEnd == std::string::npos)
+        {
+            if (buffer.size() > 1024 * 1024)
+                break; // 防御：header 超 1MB 断开
+            continue;
+        }
+
+        // 找 Content-Length
+        size_t contentLen = 0;
+        {
+            std::string lower = buffer.substr(0, headerEnd);
+            for (auto &c : lower)
+                c = (char)std::tolower(c);
+            size_t p = lower.find("content-length:");
+            if (p != std::string::npos)
+            {
+                size_t e = lower.find("\r\n", p);
+                contentLen = std::strtoul(buffer.c_str() + p + 15, nullptr, 10);
+            }
+        }
+
+        if (buffer.size() >= headerEnd + 4 + contentLen)
+            break;
+        if (contentLen > 16 * 1024 * 1024)
+            break; // 防御：body 超 16MB 断开
+    }
+
+    if (buffer.empty())
     {
         close(clientFd);
         return;
     }
-    buf[n] = '\0';
 
-    Request req = parseRequest(std::string(buf, n));
+    Request req = parseRequest(buffer);
+
+    if (req.method == "OPTIONS")
+    {
+        std::string resp = makeResponse(204, "");
+        send(clientFd, resp.c_str(), resp.size(), 0);
+        close(clientFd);
+        return;
+    }
 
     int status = 404;
     std::string body = "{\"error\":\"not found\"}";
-
-    // 按 URL 关键字匹配，逻辑和你原来的 if/else 一致
     for (auto &[key, handler] : routes)
     {
         if (req.path.find(key) != std::string::npos)
